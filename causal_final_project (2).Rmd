@@ -1,0 +1,1562 @@
+---
+title: "Estimating the Causal Effect of Smoking Cessation on Weight Gain"
+author: "Pol García, Alex Malo, Iñigo Exposito"
+date: "16/3/2025"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, results='hide', message=FALSE}
+#Load libraries
+library(readr)
+library(Hmisc)
+library(pcalg)
+library(igraph)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(survey)
+library(tableone)
+library(boot)
+library(geepack)
+library(glmnet)
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(rpart)
+library(randomForest)
+library(cobalt)
+library(tableone)
+library(survey)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(Hmisc)
+library(gridExtra)
+library(boot)
+```
+
+# Abstract
+Our study aims to analyze the causal effect of smoking cessation (the treatment, T) on weight gain (the outcome) by analyzing a dataset provided by the NEHFS. Such dataset contains data from 1566 cigarette smokers aged 25-74, who had an initial visit and a posterior one about 10 years later. Using different techniques - such as  Inverse Probability Weighting, Stabilized Inverse Probability Weighting, Model Based Standardization and Propensity Score Matching- the study aims to mitigate the impact of confounding variables and better assess potential causal relationships. While none of the methods perfectly meet all the assumptions for causal inference, the findings are remarkably consistent across approaches. In particular, the main models suggest that individuals who quit smoking gain, on average, between 2.85 and 3.35 kilograms. This consistency supports the conclusion that quitting smoking causally contributes to weight gain.
+
+
+# Introduction
+
+Understanding cause and effect is at the heart of good decision-making, especially when it comes to health-related behaviors. While it's tempting to interpret patterns in data as proof of one thing leading to another, the reality is often more complicated. Just because two variables move together doesn't necessarily mean one is responsible for the other.
+
+This is where causal inference becomes essential. Unlike simple correlation, causal inference provides tools to explore whether changes in one variable are actually driving changes in another, or whether hidden factors might be influencing both. It’s particularly powerful in settings where randomized experiments aren't feasible, such as analyzing long-term lifestyle decisions and their effects.
+
+In this project, we focus on a question with both scientific and public health relevance: does quitting smoking lead to weight gain? This isn’t just a matter of association—what matters is whether the act of quitting itself causes a change in weight, or whether other factors are at play.
+
+The dataset used contains information on over 1500 patients, visited in 1971 and later again in 1982.  Individuals in the dataset are categorized as treated (T = 1) if they reported having quit smoking before the follow-up visit, while those who continued smoking are considered untreated (T = 0). The outcome Weight gain, quantified in kilograms, measures the difference between an individual's body weight at the follow-up visit and their baseline weight. Most people gained weight, but quitters gained more weight on average (the difference was estimated to be 2.5, with a 95% confidence interval from 1.7 to 3.4). 
+
+However, there are certain differences between treated and untreated individuals that make results unreliable. For instance, quitters were on average 4 years older than non-quitters (quitters were 44% more likely to be above age 50 than non quitters), and older people gained less weight than younger people, regardless of whether they did or did not quit smoking. Therefore, what we would like to know is the difference in mean weight that would have been observed if everybody had been treated compared with untreated. To do so, we say that age is a confounder of the effect of quitting smoking on weight difference, and our analysis needs to adjust for age.  
+
+To do so, we will explore different methodologies to address confounding bias: Inverse Probability Weighting, Stabilized Inverse Probability Weighting, Model Based Standardization and Propensity Score Matching. 
+
+Prior to that, we need to select the appropiate variables we want to adjust for, as we cannot take all variables into account. To do so, we will also explore the use of Causal Discovery Methods. 
+
+# Variable Selection:
+In our variable selection process, we followed the guidelines outlined in Chapter 18 of Causal Inference: What If by Hernán and Robins (2021). It is important to emphasize that variable selection for causal inference differs fundamentally from variable selection for prediction. In causal analysis, careful and theory-driven selection of confounders is essential to assign a causal interpretation to treatment effect estimates.
+
+To achieve valid causal inference, the set of adjustment variables L must include enough information to ensure conditional exchangeability,that is, after conditioning on L, the treated (T = 1) and untreated (T = 0) groups should be comparable. Alternatively, L should block backdoor paths from treatment (T) to outcome (Y), without introducing new sources of bias.
+
+The goal of covariate adjustment is to eliminate confounding bias by leveraging the information in the measured variables. This means selecting variables that block backdoor paths from treatment to outcome while avoiding adjustment for variables that can introduce bias.
+
+
+### Bias-Inducing Variables
+Some variables should not be adjusted for, as they can introduce or increase bias in causal effect estimation. These include:
+
+- Post-treatment variables: These are variables affected by the treatment, including mediators, colliders, or their descendants. Adjusting for them can block part of the true treatment effect or induce spurious associations.
+
+  
+- Pre-treatment colliders: Even variables measured before treatment can act as colliders. Conditioning on them can open non-causal paths.
+
+
+- Instruments: Variables that affect the treatment but are not on the causal path to the outcome. Adjusting for instruments in a regression model can amplify bias due to unmeasured confounding.
+
+
+Statistical associations alone are insufficient to determine whether a variable is a confounder, collider, mediator, or instrument. Therefore,we rely on  External Subject-Matter Knowledge to choose the variables that are safe and useful for adjustment.Understanding the underlying causal structure of the problem is a prerequisite for appropriate covariate adjustment.
+
+
+So by looking to the dataset:
+
+*TREATMENT* =  qsmk : QUIT SMOKING BETWEEN 1ST QUESTIONNAIRE AND 1982, 1:YES, 0:NO
+
+*OUTCOME*  = wt82_71 : WEIGHT CHANGE IN KILOGRAMS
+
+### Pre-Treatment Confounders 
+We are going to choose variables that are measured before smoking cessation that are potential common causes of both the decision to quit smoking and weight gain. When we generate the DAG we need to check if adjusting for them helps to “block” backdoor paths between the treatment and outcome.
+The confounders that we choose are: *age, race, sex, education, active, exercice, smokeintensity, smokeyrs, alcoholfreq, wtloss*
+
+The alcohol variables may correlate with lifestyle factors affecting both smoking and weight.
+These variables are measured prior to the treatment and may confound the relationship between smoking cessation and weight change. Adjusting for them allows for a clearer estimate of the direct effect of quitting smoking on weight gain.
+
+## Missing data
+
+We followed smokers from a baseline period (1971–1975) until a follow-up in 1982. However, not everyone had their body weight recorded at follow-up, which could lead to selection bias if the missing data are linked to both quitting smoking and gaining weight.
+
+For instance, some smokers might have died before 1982, so their weight wasn't measured. If the chance of dying is different for those who quit smoking compared to those who continue, then the survivors could be healthier and less likely to gain weight. This could skew our results. Additionally, some people were lost to follow-up because they moved away or refused to participate, and these individuals might have different smoking or weight gain patterns than those who stayed in the study. Lastly, some participants dropped out because of health issues, which might also affect their weight.
+
+Overall, if missing data are related to both smoking cessation and weight gain, our final sample might not fully represent the original group, which could bias our estimates of how quitting smoking affects weight gain.
+
+```{r, echo=FALSE, results='hide', message=FALSE}
+# Load data
+directory <- "."
+data <- read.csv(file.path(directory, '/nhefs_complete.csv'))
+```
+
+## Causal Discovery methods
+
+Recall that the primary goal of this project is estimating the causal effect of smoking cessation on weight gain while adjusting for confounding.
+
+For this specific purpose, causal discovery methods can be useful but they have potential pitfalls. These methodologies can be very useful when there may hidden confounders or selection bias, or we can't to explore for alternative adjustment sets, always when the causal structure is unknown. 
+
+However, to implement these methods we have to rely on strong assumptions, such as no measurement errors, no missing confounders and valid conditional independence tests. These assumptions are essential for our methods not to lead to incorrect causal effect estimates. One of our biggest threats is the sample size, which is limited to 1566 smokers (63 additional individuals were excluded from the analysis because their weight in 1982 was not known). Methods like PC Algorithm and Bayesian Causal Discovery estimate causal graphs by testing conditional independence between variables, and too many variables could induce a high instability in the DAG estimation, which could change significantly with slight modifications to the data. 
+Our biggest concerns are:
+
+-  ⁠small sample size
+
+-  ⁠smoking cessation is a time-dependent intervention
+
+-  ⁠missing data could bias results
+
+Therefore, we decide to use the PC algorithm primarily to verify that our estimates are not unintentionally biased and that we are not overlooking important relationships, rather than as a strict guide for variable selection in our model. We will not use Bayesian Methods as prior selection plays a very important role in stability and our dataset is already unstable enough. Additionally, to improve the clarity of the DAG, we construct it using a subset of variables that we consider likely to have a meaningful connection to our variables of interest.
+
+In conclusion, to only estimate the causal effect of smoking cessation we can focus on methods that adjust for confounding, relying on causal discovery to identify possible unknown confounders affecting the causality. 
+
+```{r}
+# Construct DAG
+data_filtered <- data %>%
+    select("qsmk", "wt82_71", "age", "sex", "race", "education",
+                   "income", "smokeintensity", "smokeyrs", "wt71",'wt82', "ht",
+                    "diabetes",  "active", "exercise",
+                   "alcoholfreq",  "wtloss", 'smokeintensity', 'smkintensity82_71' )
+
+
+
+stat <- list(C = cor(data_filtered), n = nrow(data))
+pc_dat <- pc(stat, indepTest = gaussCItest, labels = colnames(data_filtered), alpha = 0.05)
+plot(pc_dat, main = "")
+```
+
+Observing this DAG, we can conclude that our variable selection is correct, as our model apparently satisfies the backdoor criterion. Recall that a Backdoor path, in our case,  is any pathway that originates from a variable with an arrow towards our treatment (quitting smoking) and eventually reaches the outcome (weight gain). By blocking these common causes, we can ensure that we identify the causal effect of smoking cessation on weight change. 
+
+We can thus conclude that the use of this DAG is stable enough to confirm the causal relationship from quitting smoking on the weight change, and the possible existence of confounders which we will block adjusting for the variables mentioned  previously. However, the clear signs of instability make it too unstable to continue our investigations on Causal Discovery methods. 
+
+# Data inspection
+
+The following plots allow for a visual insight on the distribution of our variables within the treated and untreated samples, to confirm the need for adjustments to be made for these confounding factors. 
+```{r, echo=FALSE}
+#BACK-TO-BACK PLOTS
+
+
+variables <- c("age", "race", "sex", "education", "active", "exercise", 
+               "smokeintensity", "smokeyrs", "alcoholfreq", "wtloss")
+
+
+THRESHOLD_CATEGORICAL <- 6 # if the variable has more than 10 diff types of values we consider numerical and not categorical
+plot.new()
+for (v in variables) {
+  
+ 
+  var_data <- data[[v]]
+  group_data <- data[["qsmk"]]  
+  #  check unique values
+  unique_vals <- unique(var_data[!is.na(var_data)])
+  n_unique <- length(unique_vals)
+  
+  # categorical value or not
+  is_continuous <- is.numeric(var_data) && (n_unique > THRESHOLD_CATEGORICAL)
+  
+  if (is_continuous) {
+   
+    brks <- pretty(range(var_data, na.rm=TRUE), n=10)
+    
+    out_tmp <- histbackback(split(var_data, group_data), brks=brks, plot=FALSE)
+    maxCount <- max(out_tmp$left, out_tmp$right, na.rm=TRUE)
+    
+    margin_factor <- 1.1
+    x_lim <- c(-maxCount * margin_factor, maxCount * margin_factor)
+    
+    par(mar=c(5,5.5,3,1), lheight=1.5)
+    
+    
+    #  back-to-back histogram
+    out1 <- histbackback(
+      split(var_data, group_data),
+      brks = brks,
+      xlim  = x_lim,
+      axes  = FALSE,
+      main  = paste("Back-to-back histogram of", v, "by qsmk")
+    )
+    
+    axis(1)
+    axis(2, las=1)
+    
+    mtext(c("Untreated", "Treated"), 
+          side=1, 
+          at=c(-maxCount*margin_factor/2, maxCount*margin_factor/2),
+          line=3, 
+          cex=1.2)
+    
+    mtext(v, side=2, line=3, las=0, cex=1.2)
+    
+    # Barras
+    barplot(-out1$left,  col="royalblue", horiz=TRUE, space=0, add=TRUE, axes=FALSE)
+    barplot( out1$right, col="darkred",   horiz=TRUE, space=0, add=TRUE, axes=FALSE)
+    
+    box()
+    
+  } else {
+      #If we are in a categorical value
+    var_factor <- as.factor(var_data)
+    
+
+    counts_0 <- table(var_factor[group_data == 0])
+    counts_1 <- table(var_factor[group_data == 1])
+    
+    all_levels <- union(names(counts_0), names(counts_1))
+    counts_0 <- counts_0[all_levels]
+    counts_0[is.na(counts_0)] <- 0
+    counts_1 <- counts_1[all_levels]
+    counts_1[is.na(counts_1)] <- 0
+    
+    maxCount <- max(c(counts_0, counts_1))
+    margin_factor <- 1.1
+    x_lim <- c(-maxCount * margin_factor, maxCount * margin_factor)
+    
+    # num of categories
+    n_cat <- length(all_levels)
+    
+    par(mar=c(5,5.5,3,1), lheight=1.5)
+    plot.new()
+    plot.window(xlim=x_lim, ylim=c(0.5, n_cat + 0.5))
+    
+    title(main=paste("Back-to-back barplot of", v, "by qsmk"))
+    
+    axis(1)
+    axis(2, at=1:n_cat, labels=all_levels, las=1)
+    
+    
+    mtext(c("Untreated", "Treated"), 
+          side=1, 
+          at=c(-maxCount*margin_factor/2, maxCount*margin_factor/2),
+          line=3, 
+          cex=1.2)
+    
+    
+    mtext(v, side=2, line=3, las=0, cex=1.2)
+    
+    bar_height <- 0.8
+    half_h     <- bar_height/2
+    
+    for (i in seq_len(n_cat)) {
+      # Untreated (blue) 
+      rect(xleft   = -counts_0[i],
+           ybottom = i - half_h,
+           xright  = 0,
+           ytop    = i + half_h,
+           col="royalblue",
+           border=NA)
+      
+      # Treated (red) 
+      rect(xleft   = 0,
+           ybottom = i - half_h,
+           xright  = counts_1[i],
+           ytop    = i + half_h,
+           col="darkred",
+           border=NA)
+    }
+    
+    box()
+  }
+  
+}
+
+```
+
+From the previous graphs we can observe that there are some differences between the two groups in all of the covariates that we choose to adjust for. As we know, this is caused because the dataset comes from an observational study, where  researches do not control treatment assigment, unlike in randomized experiments. Because the treatment is not independent of potential outcome we can not assume strong ignorability. Instead we try to approximate a random experiment  using statistical techniques. 
+
+
+# Results
+
+In randomized controlled trials, treatment assignment is random, ensuring that both treated and untreated groups are balanced in terms of characteristics that could influence the outcome. However, in observational studies like ours, treatment assignment (in this case, quitting smoking) is not random—people choose whether to quit based on various factors. As a result, differences in weight gain between quitters and non-quitters may be due to pre-existing differences rather than the effect of quitting itself.
+
+A propensity score is the conditional probability of receiving the treatment for each individual given their characteristics. It is computed using a statistical model (typically logistic regression) that predicts the likelihood of quitting based on relevant variables such as age, sex, smoking history, education, physical activity, and health conditions. 
+
+Mathematically, the propensity score is:
+$$
+e(X) = P(qsmk = 1 \mid X)
+$$
+
+We are going to adjust for counfunders with propensity-based methods as *Propensity Score Matching*, *inverse probability weighting*, *stabilized inverse probability weighting* and *standarization*.
+
+## IP Weighting
+
+In order to adjust for confounding in observational studies, we will use Inverse Probability Weighting, which relies on two key assumptions: that all confounders are measured (conditional exchangeability) and that every subject has a nonzero probability of receiving each treatment(positivity). This method creates a pseudo-population in which the distribution of observed covariates is balanced across treatment groups, thereby mimicking a randomized experiment.
+
+Given the probability of receiving treatment, 
+
+$$
+e(X) = P(qsmk = 1 \mid X)
+$$
+IPW assigns different weights to control and treated subjects. More precisely, 
+
+$$
+ w_{\text{treated}} = \frac{1}{e(X)} 
+$$
+and 
+$$
+w_{\text{control}} = \frac{1}{1-e(X)}
+$$
+First of all, we need to estime this probabilities. In our case, we will try different methods: logistic regression and random forest. Based on the results we get, we will decide which method will use considering our goal.
+
+```{r}
+#Prepare categorical values
+data$race<-as.factor(data$race)
+data$sex<-as.factor(data$sex)
+data$education<-as.factor(data$education)
+data$active<-as.factor(data$active)
+data$exercise<-as.factor(data$exercise)
+data$alcoholfreq<-as.factor(data$alcoholfreq)
+data$wtloss<-as.factor(data$wtloss)
+data$qsmk<-as.factor(data$qsmk)
+```
+
+After treating categorical variables as factors, we proceed to develop our logistic regression model. Using the variables outlined in the Variable Selection section, we will focus on qsmk as our target variable, which serves as the treatment variable in our study.
+
+```{r}
+#Define our logistic regression model
+lr1 <- glm(qsmk ~ age + race + sex + education + active + exercise + smokeintensity + smokeyrs + alcoholfreq + wtloss,data=data,family = binomial())
+
+#summarize the results
+summary(lr1)
+
+# Get predicted probabilities from logistic regression
+data$probs_lr1 <- predict(lr1, type = "response")
+
+# Calculate Inverse Probability Weighting
+# Initialize the column
+data$ipw_lr1 <- NA  
+
+# For treated subjects
+data$ipw_lr1[data$qsmk == 1] <- 1 / data$probs_lr1[data$qsmk == 1]
+
+# For control subjects 
+data$ipw_lr1[data$qsmk == 0] <- 1 / (1 - data$probs_lr1[data$qsmk == 0])
+
+#display results
+head(data[, c("qsmk", "probs_lr1","ipw_lr1")])
+```
+
+We will follow the same procedure as before, but instead of using classical logistic regression, we will implement a Random Forest model while maintaining the same overall strategy.
+
+```{r}
+# Fit a Random Forest model to predict 'qsmk'
+rf_model <- randomForest(qsmk ~ age +race + sex + education +active +exercise + smokeintensity + smokeyrs + alcoholfreq + wtloss,data=data,
+                         ntree = 500)
+
+# Print a summary of the model
+print(rf_model)
+
+# Obtain predicted probabilities
+rf_pred <- predict(rf_model, type = "prob")
+
+# Extract the probability for qsmk == 1 (treated subjects)
+data$ps_rf <- rf_pred[, 2]
+
+# Initialize the column
+data$ipw_rf <- NA  
+
+# For treated subjects
+data$ipw_rf[data$qsmk == 1] <- 1 / data$ps_rf[data$qsmk == 1]
+
+# For control subjects 
+data$ipw_rf[data$qsmk == 0] <- 1 / (1 - data$ps_rf[data$qsmk == 0])
+
+# Display the first few rows to check the results
+head(data[, c("qsmk", "ps_rf", "ipw_rf")])
+
+```
+
+We check balance and summarize results to ensure that the weighting process has made the treatment and control groups similar on observed covariates. This helps reduce bias in estimating the treatment effect and provides insight into the quality and efficiency of the adjustment.
+
+```{r}
+# Check balance for logistic regression weights
+bal_lr <- bal.tab(qsmk ~ age + race + sex + education + active + exercise + 
+                    smokeintensity + smokeyrs + alcoholfreq + wtloss,
+                  data = data, weights = data$ipw_lr1, un = TRUE)
+print(bal_lr)
+```
+
+
+```{r}
+# Check balance for random forest weights
+bal_rf <- bal.tab(qsmk ~ age + race + sex + education + active + exercise + 
+                    smokeintensity + smokeyrs + alcoholfreq + wtloss,
+                  data = data, weights = data$ipw_rf, un = TRUE)
+print(bal_lr)
+```
+
+We plot the results for a better visualization.
+
+```{r}
+# Convert balance tables to data frames and extract necessary columns
+df_lr <- bal_lr$Balance %>% as.data.frame() %>%
+  mutate(Covariate = rownames(.), Method = "Logistic Regression")
+
+df_rf <- bal_rf$Balance %>% as.data.frame() %>%
+  mutate(Covariate = rownames(.), Method = "Random Forest")
+
+# Combine data
+df_combined <- bind_rows(df_lr, df_rf)
+
+# Rename column to match cobalt output (usually "Diff.Adj" for weighted SMDs)
+df_combined <- df_combined %>%
+  rename(SMD = Diff.Adj)
+
+# Plot Love plot
+ggplot(df_combined, aes(x = SMD, y = Covariate, color = Method)) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(title = "Covariate Balance Comparison",
+       x = "Standardized Mean Difference (SMD)",
+       y = "Covariates") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+
+Based on these diagnostics, the propensity scores estimated via logistic regression provide better balance and less extreme weighting compared to those from the Random Forest, making logistic regression the preferred method in this case. Now, we will plot the distribution of IP weights in the treatment and control groups.
+
+```{r}
+# Create a plotting dataframe with group labels
+ipw_df <- data %>%
+  select(qsmk, ipw_lr1) %>%
+  mutate(group = if_else(qsmk == 1, "Treatment", "Control"))
+
+# Plot density curves for each group 
+ipw_density_plot <- ggplot(ipw_df, aes(x = ipw_lr1, fill = group)) +
+  geom_density(alpha = 0.6) +
+  facet_wrap(~ group, scales = "free") +
+  labs(x = "Inverse Probability Weight", y = "Density",
+       title = "Density Distribution of Inverse Probability Weights") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Print the plot
+ipw_density_plot
+
+# Plot the distribution using a mirrored histogram
+ipw_plot <- ggplot(ipw_df, aes(x = ipw_lr1)) +
+  # Histogram for Treatment group (plotted above the x-axis)
+  geom_histogram(data = filter(ipw_df, group == "Treatment"),
+                 aes(y = ..density..),
+                 fill = "blue", bins = 60, alpha = 0.7) +
+  # Histogram for Control group (plotted below the x-axis by negating the density)
+  geom_histogram(data = filter(ipw_df, group == "Control"),
+                 aes(y = -..density..),
+                 fill = "red", bins = 60, alpha = 0.7) +
+  # Add labels 
+  geom_text(data = filter(ipw_df, group == "Treatment") %>% summarise(mid = median(ipw_lr1)),
+            aes(x = mid, y = 0.4, label = "Treatment"), color = "black", size = 5) +
+  geom_text(data = filter(ipw_df, group == "Control") %>% summarise(mid = median(ipw_lr1)),
+            aes(x = mid, y = -0.4, label = "Control"), color = "black", size = 5) +
+  labs(x = "Inverse Probability Weighting", y = "Density",
+       title = "Distribution of Inverse Probability Weights") +
+  theme_minimal()
+
+# Print the plot
+ipw_plot
+
+```
+
+
+The density plot shows the distribution of inverse probability weights for the control and treatment groups. The control group has a concentrated distribution around 1 to 2, indicating stable weights, whereas the treatment group has a wider spread, with some weights exceeding 10 or 15, suggesting extreme weights. These high weights can increase variance and reduce the reliability of causal estimates. 
+
+We have different options to achieve adequate covariate balance. One option to consider could be using polynomial terms for variables that may have nonlinear relationships with treatment. Another option could be capping the weights at a specified percentile. For example, we can replace any weight above the 99th percentile with the 99th‐percentile value. Similarly, we can replace any weight below the 1st percentile with the 1st percentile value.
+
+For our first option, we will consider a logistic regression model that allows for non-linearity and interactions. Before deciding where to add non-linearity, we will plot each continuous covariate against the estimated propensity scores to see if there are curved patterns.
+
+```{r}
+# Define continuous variables
+continuous_vars <- c("age", "smokeintensity", "smokeyrs")
+
+# Loop through continuous variables and plot propensity score relationships
+for (var in continuous_vars) {
+  p <- ggplot(data, aes_string(x = var, y = "probs_lr1")) + 
+       geom_point(alpha = 0.3) + 
+       geom_smooth(method = "loess", color = "blue") + 
+       ggtitle(paste("Propensity Score vs", var))
+  print(p)
+}
+```
+
+
+This plots indicate varying degrees of non-linearity in the relationship between covariates and the propensity score. Age shows a mildly increasing trend, suggesting that a quadratic term could be considered. Smoke intensity has a strong non-linear decreasing effect, flattening at higher values, meaning it should be modeled with polynomials. Smoking years exhibits a U-shaped relationship, further confirming the need for non-linear modeling. 
+
+```{r}
+#Define our logistic regression model with non linear terms for continuous variables.
+lr2 <- glm(
+  qsmk ~ poly(age, 2) + race + sex + education + active + exercise +
+         poly(smokeintensity, 2) + poly(smokeyrs, 2) + alcoholfreq + wtloss,
+  data = data, family = binomial()
+)
+
+#print summary
+summary(lr2)
+
+# Get predicted probabilities from logistic regression
+data$probs_lr2 <- predict(lr2, type = "response")
+
+# If you intend to use the logistic model’s estimated probabilities as ps:
+data$ps2 <- data$probs_lr2 
+
+# Calculate Inverse Probability Weighting
+# Initialize the column
+data$ipw_lr2 <- NA  
+
+# For treated subjects 
+data$ipw_lr2[data$qsmk == 1] <- 1 / data$ps2[data$qsmk == 1]
+
+# For control subjects 
+data$ipw_lr2[data$qsmk == 0] <- 1 / (1 - data$ps2[data$qsmk == 0])
+
+#display results
+head(data[, c("qsmk", "ps2", "ipw_lr2")])
+```
+
+We compare two approaches: traditional logistic regression and logistic regression with nonlinear transformations. Based on the results, we will determine which model to proceed with.
+
+```{r}
+# Check balance for logistic regression weights
+bal_lr1 <- bal.tab(qsmk ~ age + race + sex + education + active + exercise + 
+                     smokeintensity + smokeyrs + alcoholfreq + wtloss,
+                   data = data, weights = data$ipw_lr1, un = TRUE)
+
+print(bal_lr1)
+# Check balance using non-linear transformations for continuous variables
+bal_lr2 <- bal.tab(qsmk ~ poly(age, 2) + race + sex + education + active + exercise + 
+                     poly(smokeintensity, 2) + poly(smokeyrs, 2) + alcoholfreq + wtloss,
+                   data = data, weights = data$ipw_lr2, un = TRUE)
+print(bal_lr2)
+```
+
+We plot the results for better visualization.
+
+```{r}
+# Convert balance tables to data frames and extract necessary columns
+df_lr1 <- bal_lr1$Balance %>% 
+  as.data.frame() %>%
+  mutate(Covariate = rownames(.), Method = "Logistic Regression")
+
+df_lr2 <- bal_lr2$Balance %>% 
+  as.data.frame() %>%
+  mutate(Covariate = rownames(.), Method = "Logistic Regression (Nonlinear)")
+
+# Combine data
+df_combined <- bind_rows(df_lr1, df_lr2)
+
+# Rename column to match cobalt output (usually "Diff.Adj" for weighted SMDs)
+df_combined <- df_combined %>%
+  rename(SMD = Diff.Adj)
+
+# Plot Love plot
+ggplot(df_combined, aes(x = SMD, y = Covariate, color = Method)) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(title = "Covariate Balance Comparison",
+       x = "Standardized Mean Difference (SMD)",
+       y = "Covariates") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+```
+
+To enhance interpretation, we generate two separate plots: one for the continuous variables (including the non-linear transformations applied in the logistic regression) and one for the categorical variables.
+
+```{r}
+# Get unique covariates from each method
+cov_lr1 <- unique(df_lr1$Covariate)
+cov_lr2 <- unique(df_lr2$Covariate)
+
+# Covariates that appear in both data frames (common)
+common_cov <- intersect(cov_lr1, cov_lr2)
+# Covariates that appear only in one of them (non-common)
+non_common_cov <- setdiff(unique(df_combined$Covariate), common_cov)
+
+# Filter data for common covariates
+df_common <- df_combined %>% filter(Covariate %in% common_cov)
+# Filter data for non-common covariates
+df_noncommon <- df_combined %>% filter(Covariate %in% non_common_cov)
+
+# Plot for common covariates
+p_common <- ggplot(df_common, aes(x = SMD, y = Covariate, color = Method)) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(title = "Covariate Balance",
+       x = "SMD",
+       y = "Covariates") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Plot for non-common covariates
+p_noncommon <- ggplot(df_noncommon, aes(x = SMD, y = Covariate, color = Method)) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(title = "Covariate Balance",
+       x = "SMD",
+       y = "Covariates") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Display both plots side by side
+grid.arrange(p_common, p_noncommon, ncol = 2)
+
+
+```
+
+Based on the previous plot, we get the following results:
+
+-Quadratic transformations significantly improve balance for continuous variables, especially age and smokeyrs.
+
+-Binary covariates remain stable, with no significant imbalance introduced.
+
+-Smoke intensity shows a small increase in imbalance in the first-order term, but overall, it remains reasonably balanced.
+
+We will continue with capping the weights at a specified percentile. For example, replace any weight above the 99th percentile with the 99th‐percentile value and we will replace any weight below the 1st percentile with the 1 st percentile value.
+
+```{r}
+# Calculate the 1st and 99th percentiles of ipw_lr2
+ipw_1st_percentile <- quantile(data$ipw_lr2, 0.01, na.rm = TRUE)
+ipw_99th_percentile <- quantile(data$ipw_lr2, 0.99, na.rm = TRUE)
+
+# Create a new dataset with capped IPW values
+data_capped <- data %>%
+  mutate(ipw_capped = pmax(pmin(ipw_lr2, ipw_99th_percentile), ipw_1st_percentile))
+
+# Create a plotting dataframe
+ipw_hist_df <- data_capped %>%
+  select(qsmk, ipw_capped) %>%
+  mutate(group = if_else(qsmk == 1, "Treatment", "Control"))
+
+# Density Plot of Capped Weights
+ipw_density_plot <- ggplot(ipw_hist_df, aes(x = ipw_capped, fill = group)) +
+  geom_density(alpha = 0.6) +
+  facet_wrap(~ group, scales = "free") +
+  labs(x = "Inverse Probability Weight", y = "Density",
+       title = "Density Distribution of Capped Inverse Probability Weights") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Print the density plot
+print(ipw_density_plot)
+
+# Compute medians for label placement
+median_treatment <- median(ipw_hist_df$ipw_capped[ipw_hist_df$group == "Treatment"], na.rm = TRUE)
+median_control <- median(ipw_hist_df$ipw_capped[ipw_hist_df$group == "Control"], na.rm = TRUE)
+
+#Histogram Plot
+ipw_plot <- ggplot(ipw_hist_df, aes(x = ipw_capped)) +
+  # Histogram for Treatment group (above x-axis)
+  geom_histogram(data = filter(ipw_hist_df, group == "Treatment"),
+                 aes(y = ..density..),
+                 fill = "blue", bins = 60, alpha = 0.7) +
+  # Histogram for Control group (below x-axis)
+  geom_histogram(data = filter(ipw_hist_df, group == "Control"),
+                 aes(y = -..density..),
+                 fill = "red", bins = 60, alpha = 0.7) +
+  # Add labels for medians
+  geom_text(aes(x = median_treatment, y = 0.4, label = "Treatment"), 
+            color = "black", size = 5) +
+  geom_text(aes(x = median_control, y = -0.4, label = "Control"), 
+            color = "black", size = 5) +
+  labs(x = "Inverse Probability Weighting", y = "Density",
+       title = "Distribution of Capped Inverse Probability Weights") +
+  theme_minimal()
+
+# Print the plot
+print(ipw_plot)
+
+```
+
+With this procedure we reduced extreme weights in the treatment group. The control group remained almost unchanged, meaning no unnecessary distortion
+
+```{r}
+# Check balance for logistic regression weights
+bal.tab(qsmk ~ age + race + sex + education + active + exercise + smokeintensity + smokeyrs + alcoholfreq + wtloss,
+        data = data, weights = data$ipw_lr1)
+
+# Balance check using capped IPW
+bal.tab(qsmk ~ poly(age, 2) + race + sex + education + active + exercise +
+        poly(smokeintensity, 2) + poly(smokeyrs, 2) + alcoholfreq + wtloss, 
+        data = data_capped, weights = data_capped$ipw_capped)
+
+```
+
+We will also assess covariate balance before and after Inverse Probability Weighting (IPW) by calculating standardized mean differences (SMDs) and plotting them.
+
+```{r}
+# Create a survey design object with the capped weights
+data_weighted <- svydesign(ids = ~1, data = data_capped, weights = data_capped$ipw_capped)
+
+# Define covariates with meaningful names
+covariates <- c("age", "race", "sex", "education", "active", "exercise", 
+                "smokeintensity", "smokeyrs", "alcoholfreq", "wtloss")
+
+# Compute standardized mean differences before and after weighting
+weighted_table <- svyCreateTableOne(vars = covariates, strata = "qsmk", 
+                                    data = data_weighted, test = FALSE)
+unweighted_table <- CreateTableOne(vars = covariates, strata = "qsmk", 
+                                   data = data, test = FALSE)
+
+# Extract SMDs and reshape for visualization
+smd_data <- data.frame(
+  Variable = rownames(ExtractSmd(weighted_table)),                        
+  Unadjusted = as.numeric(ExtractSmd(unweighted_table)),                      
+  Weighted = as.numeric(ExtractSmd(weighted_table))
+) %>%
+  pivot_longer(-Variable, names_to = "Method", values_to = "SMD") %>%
+  arrange(desc(SMD))  # Ensure variables are sorted for better visualization
+
+# Plot balance before and after weighting
+smd_bar <- ggplot(smd_data, aes(x = Variable, y = SMD, fill = Method)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8)) +
+  coord_flip() +
+  labs(x = "Covariates", y = "Standardized Mean Difference (SMD)",
+       title = "Comparison of Covariate Balance Before and After Weighting",
+       fill = "Adjustment Method") +
+  scale_fill_manual(values = c("red", "blue")) +
+  theme_minimal() +
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 14),
+        plot.title = element_text(face = "bold", size = 16, hjust = 0.5))
+        
+# Display the plot
+print(smd_bar)
+```
+
+We can appreciate that IPW effectively balances the covariates. Finally, we will fit the logistic regression model to analyze the causal effect between qsmk and wt82_71.
+
+```{r}
+# Fit the model
+ipw_model <- geeglm(wt82_71 ~ qsmk, data = data_capped, 
+                    weights = ipw_capped, id = seqn, corstr = "independence")
+summary(ipw_model)
+
+# Extract coefficients and standard errors
+beta_ipw <- coef(ipw_model)
+SE_ipw <- coef(summary(ipw_model))[, 2]
+
+# Compute the lower and upper 95% confidence limits
+low_ipw <- beta_ipw - qnorm(0.975) * SE_ipw
+up_ipw <- beta_ipw + qnorm(0.975) * SE_ipw
+
+# Combine results into a single matrix and print it
+results <- cbind(beta_ipw, low_ipw, up_ipw)
+print(results)
+
+```
+
+Based on our model, the control group  has an estimated mean outcome of about 1.83 (95% CI: 1.40 to 2.26). The treatment group  has an additional estimated increase of 3.35 units (95% CI: 2.37 to 4.33) over the control group. Both estimates are statistically significant, with the treatment effect highly significant (p < 2.1e-11).
+This means that individuals who quit smoking gained, on average, 3.35 kg more compared to those who continued smoking.
+
+## Stabilized IP Weighting
+
+Stabilized Inverse Probability Weighting also aims to eliminate the association between covariates and treatment by constructing a pseudo-population. However, unlike conventional IP weights, it adjusts the weighting process by incorporating the overall probability of receiving the treatment (for treated individuals) or the probability of not receiving the treatment (for untreated individuals) in the original population. This adjustment helps reduce variance and improves the stability of the weights while maintaining the interpretability of the estimated treatment effect. Let P(T=1) be the overall probability of treatment in the population and P(T=0) be the Overall probability of non-treatment in the population. Following the notation used above, 
+
+$w^{\text{stabilised}}_{\text{treated}} = \frac{P(T=1)}{e(X)}$
+
+$w^{\text{stabilised}}_{\text{untreated}} = \frac{1 - P(T=1)}{1 - e(X)}$
+
+In this case, we will consider our initial logistic regression model(without applying any capping and without applying any non linear transformations) and consider Stabilized Inverse Probability weighting. we will compare it with our last mode (the one that includes capping and appliesg non linear transformations).
+
+```{r}
+#Calculate the Marginal Probability of Treatment
+num_NA <- sum(is.na(data$qsmk))
+#Since it is a binary variable the probability of treatment will be the proportion of 1
+prob_treatment <- mean(as.numeric(as.character(data$qsmk)))
+# Initialize the column
+data$ipw_sta <- NA  
+#Compute weights for treated group
+data$ipw_sta[data$qsmk == 1] <- prob_treatment / data$probs_lr1[data$qsmk == 1]
+#Calculating Weights for control group
+data$ipw_sta[data$qsmk == 0] <- (1 - prob_treatment) / (1 - data$probs_lr1[data$qsmk == 0])
+```
+
+Following the same procedure if the previous part, we will plot the distribution of the weights and analyze its major findings.
+
+```{r}
+# Create a plotting dataframe 
+ipw_sta_df <- data %>%
+  select(qsmk, ipw_sta) %>%
+  mutate(group = if_else(qsmk == 1, "Treatment", "Control"))
+
+# 1. Plot density curves for each group with facet wrap
+ipw_density_plot <- ggplot(ipw_sta_df, aes(x = ipw_sta, fill = group)) +
+  geom_density(alpha = 0.6) +
+  facet_wrap(~ group, scales = "free") +
+  labs(x = "Stabilized Inverse Probability Weight", y = "Density",
+       title = "Density Distribution of Stabilized Inverse Probability Weights") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Print the density plot
+print(ipw_density_plot)
+
+# 2. Plot the distribution using a mirrored histogram
+ipw_plot <- ggplot(ipw_sta_df, aes(x = ipw_sta)) +
+  # Histogram for Treatment group (above the x-axis)
+  geom_histogram(data = filter(ipw_sta_df, group == "Treatment"),
+                 aes(y = ..density..),
+                 fill = "blue", bins = 60, alpha = 0.7) +
+  # Histogram for Control group (mirrored below the x-axis)
+  geom_histogram(data = filter(ipw_sta_df, group == "Control"),
+                 aes(y = -..density..),
+                 fill = "red", bins = 60, alpha = 0.7) +
+  # Add text labels for each group at the median value of ipw_sta
+  geom_text(data = filter(ipw_sta_df, group == "Treatment") %>% 
+              summarise(mid = median(ipw_sta)),
+            aes(x = mid, y = 0.4, label = "Treatment"), color = "black", size = 5) +
+  geom_text(data = filter(ipw_sta_df, group == "Control") %>% 
+              summarise(mid = median(ipw_sta)),
+            aes(x = mid, y = -0.4, label = "Control"), color = "black", size = 5) +
+  labs(x = "Stabilized Inverse Probability Weight", y = "Density",
+       title = "Distribution of Stabilized Inverse Probability Weights") +
+  theme_minimal()
+
+# Print the mirrored histogram plot
+print(ipw_plot)
+
+```
+
+In the stabilized weights plot, most observations—both in the control and treatment groups—have weights close to 1, with relatively few observations requiring high reweighting. This indicates that the model’s adjustment doesn’t rely heavily on outliers to balance the groups. The right-skewed shape (particularly for the treatment group) does show that some individuals have higher weights, but those are not excessively large. This contrasts with the capped weights distribution, where more observations end up with moderately high weights (around 3–4 for the treatment group) because any extremely large weights were truncated.
+
+We will proceed on the comparison between the capped IPW and SIPW.
+
+```{r}
+# Balance check using capped IPW
+bal.tab(qsmk ~ poly(age, 2) + race + sex + education + active + exercise +
+        poly(smokeintensity, 2) + poly(smokeyrs, 2) + alcoholfreq + wtloss, 
+        data = data_capped, weights = data_capped$ipw_capped)
+
+
+# Check balance for stabilized weights
+bal.tab(qsmk ~ age + race + sex + education + active + exercise + smokeintensity + smokeyrs + alcoholfreq + wtloss,
+        data = data, weights = data$ipw_sta)
+
+```
+
+We plot the results for a better visualization.
+
+```{r}
+# Check balance using capped IPW
+bal_capped <- bal.tab(qsmk ~ poly(age, 2) + race + sex + education + active + exercise +
+                        poly(smokeintensity, 2) + poly(smokeyrs, 2) + alcoholfreq + wtloss, 
+                      data = data_capped, weights = data_capped$ipw_capped, un = TRUE)
+
+# Check balance using stabilized IPW
+bal_sta <- bal.tab(qsmk ~ age + race + sex + education + active + exercise + smokeintensity + smokeyrs + alcoholfreq + wtloss,
+                   data = data, weights = data$ipw_sta, un = TRUE)
+
+# Convert balance tables to data frames and extract necessary columns
+df_capped <- bal_capped$Balance %>%
+  as.data.frame() %>%
+  mutate(Covariate = rownames(.), Method = "Capped IPW")
+
+df_sta <- bal_sta$Balance %>%
+  as.data.frame() %>%
+  mutate(Covariate = rownames(.), Method = "Stabilized IPW")
+
+# Combine data frames
+df_combined <- bind_rows(df_capped, df_sta)
+
+# Rename the column to match SMD for plotting
+df_combined <- df_combined %>%
+  rename(SMD = Diff.Adj)
+
+# Plot Love plot
+ggplot(df_combined, aes(x = SMD, y = Covariate, color = Method)) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(title = "Covariate Balance Comparison: Capped vs. Stabilized IPW",
+       x = "Standardized Mean Difference (SMD)",
+       y = "Covariates") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+To enhance interpretation, we generate two separate plots: one for the continuous variables (including the non-linear transformations applied in the logistic regression) and one for the categorical variables.
+
+```{r}
+# --- Split covariates into common and non-common ---
+# Unique covariates from each method
+cov_capped <- unique(df_capped$Covariate)
+cov_sta <- unique(df_sta$Covariate)
+
+# Covariates that appear in both data frames (common)
+common_cov <- intersect(cov_capped, cov_sta)
+# Covariates that appear only in one of them (non-common)
+non_common_cov <- setdiff(unique(df_combined$Covariate), common_cov)
+
+# Filter data for common and non-common covariates
+df_common <- df_combined %>% filter(Covariate %in% common_cov)
+df_noncommon <- df_combined %>% filter(Covariate %in% non_common_cov)
+
+# --- Create separate plots ---
+
+# Plot for common covariates
+p_common <- ggplot(df_common, aes(x = SMD, y = Covariate, color = Method)) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(title = "Covariate Balance (Common Covariates)",
+       x = "Standardized Mean Difference (SMD)",
+       y = "Covariates") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Plot for non-common covariates
+p_noncommon <- ggplot(df_noncommon, aes(x = SMD, y = Covariate, color = Method)) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(title = "Covariate Balance (Non-Common Covariates)",
+       x = "Standardized Mean Difference (SMD)",
+       y = "Covariates") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Display both plots side by side
+grid.arrange(p_common, p_noncommon, ncol = 2)
+
+```
+
+Both weighting approaches yield very good covariate balance, as indicated by the small adjusted differences  for nearly all variables.Focusing on the stabilized weights model, the balance check shows that all covariate differences are minimal, with adjusted differences generally below 0.03. This excellent balance indicates that the weighting has effectively minimized pre-treatment differences between the control and treatment groups. Moreover, the effective sample sizes remain high (1135 for controls and 338 for treated), suggesting that the stabilized weights preserve a large portion of the original sample while achieving this balance. 
+
+```{r}
+# Create a survey design object with the stabilized weights
+data_weighted <- svydesign(ids = ~1, data = data, weights = data$ipw_sta)
+
+# Define covariates with meaningful names
+covariates <- c("age", "race", "sex", "education", "active", "exercise", 
+                "smokeintensity", "smokeyrs", "alcoholfreq", "wtloss")
+
+# Compute standardized mean differences before and after weighting
+weighted_table <- svyCreateTableOne(vars = covariates, strata = "qsmk", 
+                                    data = data_weighted, test = FALSE)
+unweighted_table <- CreateTableOne(vars = covariates, strata = "qsmk", 
+                                   data = data, test = FALSE)
+
+# Extract SMDs and reshape for visualization
+smd_data <- data.frame(
+  Variable = rownames(ExtractSmd(weighted_table)),                        
+  Unadjusted = as.numeric(ExtractSmd(unweighted_table)),                      
+  Weighted = as.numeric(ExtractSmd(weighted_table))
+) %>%
+  pivot_longer(-Variable, names_to = "Method", values_to = "SMD") %>%
+  arrange(desc(SMD))  # Sort variables for better visualization
+
+# Plot balance before and after weighting
+smd_bar <- ggplot(smd_data, aes(x = Variable, y = SMD, fill = Method)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8)) +
+  coord_flip() +
+  labs(x = "Covariates", y = "Standardized Mean Difference (SMD)",
+       title = "Covariate Balance Before and After Stabilized Weighting",
+       fill = "Adjustment Method") +
+  scale_fill_manual(values = c("red", "blue")) +
+  theme_minimal() +
+  theme(axis.text = element_text(size = 12),
+        axis.title = element_text(size = 14),
+        plot.title = element_text(face = "bold", size = 16, hjust = 0.5))
+
+# Display the plot
+print(smd_bar)
+
+```
+
+This bar chart shows standardized mean differences (SMD) for each covariate before (red bars) and after (blue bars) applying the stabilized weights. Before weighting, many covariates have noticeable imbalances (red bars extending beyond 0.1). After weighting, nearly all covariates have SMDs that are much closer to zero (blue bars), indicating that the weighting procedure successfully reduced group differences. 
+
+```{r}
+# Fit the model
+ipw_sta_model <- geeglm(wt82_71 ~ qsmk, data = data, 
+                    weights = ipw_sta, id = seqn, corstr = "independence")
+summary(ipw_sta_model)
+
+# Extract coefficients and standard errors
+beta_ipw_sta <- coef(ipw_sta_model)
+SE_ipw_sta <- coef(summary(ipw_sta_model))[, 2]
+
+# Compute the lower and upper 95% confidence limits
+low_ipw_sta <- beta_ipw_sta - qnorm(0.975) * SE_ipw_sta
+up_ipw_sta <- beta_ipw_sta + qnorm(0.975) * SE_ipw_sta
+
+# Print results
+results_sta <- cbind(beta_ipw_sta, low_ipw_sta, up_ipw_sta)
+print(results_sta)
+```
+
+These results indicate that, after applying stabilized weights, the treatment group has an estimated 3.14-point higher wt82_71 outcome on average compared to the control group. The intercept of 1.82 represents the estimated average outcome for the control group, with all results being statistically significant, as indicated by p-values and confidence intervals. Overall, quitting smoking is associated with a significant increase in weight, with an average weight gain of 3.14 kg compared to those who continued smoking.
+
+
+### Model-based Standardization
+
+For this part we are based on the Chapter 13 of the book.
+
+Standarization is a method to estimate the average causal effects in
+both randomized and observational studies. Standardization allows us to
+estimate what the outcome would have been if the distribution of
+confounding variables had been the same across treatment groups.
+Specifically, we aim to estimate the counterfactual mean outcomes under
+different treatment assignments. The average causal effect of smoking
+cessation can be expressed as:
+$$
+\mathbb{E}[Y^{t=1, c=0}] - \mathbb{E}[Y^{t=0, c=0}]$$
+
+We must assume: 
+
+- **Conditional exchangeability**: After adjusting for
+the set of confounders $L$, treatment assignment is as good as random.
+
+-**Positivity**: There must be a nonzero probability of receiving each
+treatment level across all levels of $L$.
+
+Under this assumptions standarizatiom allows us to:
+
+1\. Fit a model to estimate $\mathbb{E}[Y \mid T, L]$.
+
+2\. Predict outcomes under $T = 1$ and $T = 0$ for all individuals in
+the sample (creating a pseudo-population).
+
+3\.  Compute the mean predicted outcome\*\* in each pseudo-population: $$
+    \hat{\mathbb{E}}[Y^{t=1, c=0}] \quad \text{and} \quad \hat{\mathbb{E}}[Y^{t=0, c=0}]
+    $$
+    
+4\. Estimate the average causal effect as the difference between these standardized mean outcomes.
+
+
+```{r include=FALSE}
+# Create a summary table
+summary_table <- data_filtered %>%
+  group_by(qsmk) %>%
+  summarise(
+    Count = n(),
+    Wtincrease = sum(wt82_71 >= "0", na.rm = TRUE),
+    Wtdecrease = sum(wt82_71 < "0", na.rm = TRUE),
+    
+  )
+
+# Print the table
+print(summary_table)
+
+```
+
+```{r echo=FALSE}
+#Here is a table of the mean of some confounders stratificated
+covariate_distribution <- data %>%
+  group_by(qsmk) %>%
+  summarise(
+    Race_0 = mean(race == "0", na.rm = TRUE),
+    Race_1 = mean(race == "1", na.rm = TRUE),
+    Sex_1 = mean(sex == "1", na.rm = TRUE),
+    Sex_0 = mean(sex == "0", na.rm = TRUE),
+    Age = mean(age , na.rm= TRUE),
+    Smoke_years = mean(smokeyrs,na.rm =TRUE),
+    smokeintensity = mean(smokeintensity),
+    Edu_1= mean(education=="1",  na.rm = TRUE),
+    Edu_2= mean(education=="2",  na.rm = TRUE),
+    Edu_3= mean(education=="3",  na.rm = TRUE),
+    Edu_4= mean(education=="4",  na.rm = TRUE),
+    Edu_5= mean(education=="5",  na.rm = TRUE),
+    Active_0 = mean(active=="0"),
+    Active_1 = mean(active=="1", na.rm = TRUE),
+    Active_2 = mean(active=="2", na.rm = TRUE),
+    NO_Exercise = mean(exercise == "0"),
+    Medium_Exercise = mean(exercise == "1", na.rm = TRUE),
+    Active_Exercise = mean(exercise == "2", na.rm = TRUE),
+  )
+print(covariate_distribution)
+
+```
+
+This table shows how covariate distributions differ across treatment
+groups, providing insight into the levels of potential confounders.
+
+Ideally, we would stratify the population by all levels of the
+confounders $L$ and compute the mean outcome $$
+   \mathbb{E}[Y \mid T = t, C = 0, L = l]
+   $$ within each stratum $l$. Then, we would average these
+stratum-specific means over the marginal distribution of $L$ in the
+overall population.
+
+In our case, $L$ contains many variables, several of which are
+categorical with multiple levels, leading to a very large number of
+possible strata. This makes fully nonparametric estimation impractical
+due:
+
+-   Too many groups will cause the curse of dimensionality. 
+
+-   Data Sparsity: many strata is going to contain only a few
+    observations.
+
+Instead of nonparametric stratification, we estimate the conditional
+mean outcomes $$
+   \mathbb{E}[Y \mid T = t, C = 0, L = l]
+   $$parametrically by fitting a linear regression model.
+   
+
+
+```{r include=FALSE}
+
+#put the data as catergorical value
+data_filtered$race<-as.factor(data_filtered$race)
+data_filtered$sex<-as.factor(data_filtered$sex)
+data_filtered$education<-as.factor(data_filtered$education)
+data_filtered$active<-as.factor(data_filtered$active)
+data_filtered$exercise<-as.factor(data_filtered$exercise)
+data_filtered$alcoholfreq<-as.factor(data_filtered$alcoholfreq)
+data_filtered$wtloss<-as.factor(data_filtered$wtloss)
+data_filtered$qsmk<-as.factor(data_filtered$qsmk)
+str(data_filtered)
+```
+
+We define the model:
+```{r}
+#Define our LINEAR regression model
+lr1 <- glm( wt82_71 ~ qsmk +poly(age, 2) + race + sex + education + active + exercise + poly(smokeyrs, 2) + poly(smokeintensity, 2) + alcoholfreq + wtloss, data=data_filtered)
+
+# we use quadratic elements because we want to be consistent with the specifications used in our logistic model.
+
+summary(lr1)
+
+```
+
+Lets generate some conterfactual data and predict counterfactual
+outcomes. We are going to use the fitted regression model to predict
+weight change under both treatment conditions. And then we are going to
+compute the mean predicted weight change in each counterfactual dataset.
+
+```{r}
+# Duplicate data and set qsmk while keeping it a factor
+data_treated <- data_filtered
+data_treated$qsmk <- factor(1, levels = levels(data_filtered$qsmk))  # Ensure it's a factor
+  
+data_untreated <- data_filtered
+data_untreated$qsmk <- factor(0, levels = levels(data_filtered$qsmk))  # Ensure it's a factor
+
+# now we generate 2 pseudo-populations.
+
+# Predict weight change
+data_treated$predicted_wtchange <- predict(lr1, newdata = data_treated, type = "response")
+data_untreated$predicted_wtchange <- predict(lr1, newdata = data_untreated, type = "response")
+
+# Compute the Standardized Means
+mean_treated <- mean(data_treated$predicted_wtchange)
+mean_untreated <- mean(data_untreated$predicted_wtchange)
+
+```
+
+We define key measure to compare the counterfactual mean outcomes under
+treatment $t=1$ versus $t=0$: 
+
+- **Difference**:
+
+$$
+  \hat{\mathbb{E}}[Y^{t=1}] \;-\; \hat{\mathbb{E}}[Y^{t=0}]
+  $$
+  $\hat{\mathbb{E}}[Y^{t=1}]$ and $\hat{\mathbb{E}}[Y^{t=0}]$ denote the
+standardized estimates of the average outcome. 
+
+```{r}
+causal_difference <- mean_treated - mean_untreated  # Difference in means
+causal_ratio <- mean_treated / mean_untreated       # Ratio of means
+
+print(causal_difference)
+
+```
+
+We use bootstrap to approximate the sampling distribution of the
+standardized estimates and compute confidence intervals.
+
+```{r echo=FALSE}
+library(boot)
+
+standardization <- function(data, indices) {
+  d <- data_filtered[indices,]  # Bootstrap sample
+  
+  fit <- glm(wt82_71 ~ qsmk +poly(age, 2) + race + sex + education + active + exercise + poly(smokeyrs, 2) + poly(smokeintensity, 2) + alcoholfreq + wtloss, data=d)
+  
+  d_treated <- d
+  d_treated$qsmk <- factor(1, levels = levels(d$qsmk))
+  d_treated$predicted_wtchange <- predict(fit, newdata = d_treated, type = "response")
+  
+  d_untreated <- d
+  d_untreated$qsmk <- factor(0, levels = levels(d$qsmk))
+  d_untreated$predicted_wtchange <- predict(fit, newdata = d_untreated, type = "response")
+  
+  mean_treated <- mean(d_treated$predicted_wtchange)
+  mean_untreated <- mean(d_untreated$predicted_wtchange)
+  
+  return(c(mean_treated, mean_untreated, mean_treated - mean_untreated, mean_treated / mean_untreated))
+}
+
+results_boot <- boot(data=data, statistic=standardization, R=1000)
+
+# Compute standard errors & confidence intervals
+SE_standardization <- apply(results_boot$t, 2, sd)
+mean_standardization <- results_boot$t0
+ll_standardization <- mean_standardization - qnorm(0.975) * SE_standardization
+ul_standardization <- mean_standardization + qnorm(0.975) * SE_standardization
+
+# Print the results
+print(data.frame(
+  Scenario = c("Treated", "Untreated", "Difference", "Ratio"),
+  Mean = mean_standardization,
+  SE = SE_standardization,
+  Lower_CI = ll_standardization,
+  Upper_CI = ul_standardization
+))
+
+```
+
+
+Overall, quitting smoking is associated with a significant increase in weight, with an average weight gain of 3.31 kg compared to those who continued smoking. This difference is statistically significant as indicated by the credible intervals. 
+
+
+# Propensity Score Matching
+
+In this section we use Propensity Score Matching (PSM), which stems in a similar way to IPW (calcultating propensity scores).
+
+When calculating the propensity scores, we can account for differences in our confounders amongst those who quit smoking and those who don't. Those differences are precisely what we must adjust for. Now, instead of calculating the inverse probabilities, we compute Propensity Scores Matching. 
+
+This technique consists on matching each quitter with a non-quitter who has a similar propensity score (i.e a similar probability of receiving treatment), ensuring that both groups have comparable characteristics. By doing so, we reduce bias and create a balanced dataset, allowing us to estimate the causal effect of quitting smoking on weight gain more accurately. This can be done in two ways:
+
+### **Propensity Score Matching: With vs. Without Replacement**  
+
+Propensity Score Matching can be performed with or without replacement, each with its own trade-offs:
+
+- **Matching Without Replacement**: Each untreated individual (non-quitter) is matched to only one treated individual (quitter). This ensures unique matches but may lead to poor matches when there are large differences between groups, especially if there are few non-quitters with similar propensity scores. 
+
+- **Matching With Replacement**: The same untreated individual can be used multiple times as a match. This improves match quality, especially when the treatment and control groups differ significantly, but can reduce the number of unique controls and may increase variance in estimates.
+
+Choosing between these methods depends on the balance between match quality and sample representativeness. 
+
+In this section, we first calculate the propensity scores and then use PSM to check for statistically significant differences in weight gain between quitters and non-quitters, accounting for the propensity scores. 
+
+To calculate propensity scores, we use the model found most effective for IPW, repeated below for convenience. Once again, recall we must assume exchangeability and positivity for the results to be valid. 
+
+```{r}
+#Recall the regression model with non linear transformations
+log.reg <- glm(
+  qsmk ~ poly(age, 2) + race + sex + education + active + exercise +
+         poly(smokeintensity, 2) + poly(smokeyrs, 2) + alcoholfreq + wtloss,
+  data = data, family = binomial()
+)
+```
+
+We print a summary of the model.
+```{r}
+#Summary from the model
+data$ps <- predict(log.reg, type="response")
+summary(data$ps)
+```
+
+
+```{r,psbyqsmk, fig.height=5, fig.width=10, dpi=100, echo=FALSE}
+# below we re use the code for the second assignment. To do so, we slightly adapt our variables 
+data$trt <- data$qsmk
+data$trt<-as.numeric(data$trt)-1
+par(mfrow=c(1, 2))
+outps <- histbackback(split(data$ps, data$trt), axes=FALSE)
+axis(1)
+axis(2, las=1, at=1:length(outps$breaks)-0.5,
+     labels=round(seq(min(data$ps), max(data$ps), length.out=length(outps$breaks)), 2))
+mtext(c("Untreated", "Treated"), side=1, at=c(-150, 50), line=3, cex=1.5)
+mtext("Propensity score", side=2, at=6, line=3, cex=1.5)
+barplot(-outps$left, col="royalblue" , horiz=TRUE, space=0, add=TRUE, axes=FALSE)
+barplot(outps$right, col="darkred", horiz=TRUE, space=0, add=TRUE, axes=FALSE)
+plot(data$ps, jitter(data$trt+0.5), pch=16, cex=0.5, axes=FALSE, type="p",
+     col=c("royalblue", "darkred")[data$trt+1], xlim=c(0,1), ylim=c(0,2), xlab="", ylab="")
+axis(1)
+mtext(c("Untreated", "Treated"), side=2, at=c(0.5, 1.5), line=3, las=1, adj=0, cex=1.5)
+mtext("Propensity score", side=1, at=0.5, line=2.5, cex=1.5)
+lines(quantile(data$ps[data$trt==0])[c(2,4)], c(0.85, 0.85), col="royalblue")
+lines(rep(quantile(data$ps[data$trt==0])[3], 2), c(0.8, 0.9), col="royalblue")
+lines(quantile(data$ps[data$trt==1])[c(2,4)], c(1.15, 1.15), col="darkred")
+lines(rep(quantile(data$ps[data$trt==1])[3], 2), c(1.1, 1.2), col="darkred")
+
+ggplot(data, aes(x = ps, fill = factor(qsmk))) +
+  geom_histogram(position = "identity", bins = 30, alpha = 0.5) +
+  labs(x = "Propensity Score", fill = "Treatment") +
+  theme_minimal()
+
+```
+Results from the plots above suggest that propensity scores are imbalanced across treatment groups (smoking quitters and non-quitters). However, we can already see a very clear imbalance between number of treated and untreated individuals, which could threaten our results. We have a total of 403 untreated patients, and 1163 untreated, which stands for a high imbalance. This is not inherently a problem, but it can have important implications for interpretation, specially for matching without replacement. In such methodology, each untreated individual can only be used once and thus we run the risk of having poorer matches. Given that we will discard many untreated individuals, we run the risk of losing valuable information. However, we can inspect the quality of the matching to decide whether the results are significant or not. 
+
+Before that, we show one more plot to allow for a clearer insight on how propensity scores affect the distribution of the age of patients. 
+
+```{r,psage, fig.height=5, fig.width=5, dpi=100, echo=FALSE}
+data$psgp <- cut(data$ps, breaks=quantile(data$ps, prob=0:5*0.2),
+                labels=c("Q1","Q2","Q3","Q4","Q5"), right=FALSE, include.lowest=TRUE)
+
+par(mar=c(5,5.5,1,1))
+plot(0, type="n", axes=FALSE, xlim=c(0.75,6.25), ylim=c(40,70), xlab="", ylab="")
+axis(1, at=1:5, labels=paste("Q", 1:5, sep=""))
+axis(1, at=6, labels="")
+lines(c(5.75,6.25), rep(40,2))
+axis(2, las=1, at=4:7*10)
+mtext("Age", side=2, at=65, line=4.5, las=1, adj=0, cex=1.5)
+mtext("Quintiles of propensity score", side=1, at=3, line=2.5, cex=1.5)
+mtext("Overall", side=1, at=6, line=1)
+lines(rep(6-0.05, 2), quantile(data$age[data$trt==0])[c(2,4)], col=2)
+lines(rep(6+0.05, 2), quantile(data$age[data$trt==1])[c(2,4)], col=4)
+lines(c(6-0.08,6-0.02), rep(quantile(data$age[data$trt==0])[c(3)],2), col=2)
+lines(c(6+0.02,6+0.08), rep(quantile(data$age[data$trt==1])[c(3)],2), col=4)
+for(i in 1:5){
+  lines(rep(i-0.05, 2), quantile(data$age[data$trt==0 & data$psgp==paste("Q", i, sep="")])[c(2,4)], col="royalblue")
+  lines(rep(i+0.05, 2), quantile(data$age[data$trt==1 & data$psgp==paste("Q", i, sep="")])[c(2,4)], col="darkred")
+  lines(c(i-0.08,i-0.02), rep(quantile(data$age[data$trt==0 & data$psgp==paste("Q", i, sep="")])[c(3)],2), col="royalblue")
+  lines(c(i+0.02,i+0.08), rep(quantile(data$age[data$trt==1 & data$psgp==paste("Q", i, sep="")])[c(3)],2), col="darkred")
+}
+```
+
+
+The plot above confirms very significant deviations in propensity scores across one of our most important covariates. We can observe a clear tendency for individuals to be more likely to be treated as age increases.   
+
+To run the Propensity Score Matching, several available methodologies can be implemented, such as the "Matching" and "MatchiIt" packages one can download from Cran. Below we perform PSM with a simple algorithm that matches every treated individual to the untreated one with the closest propensity score. Note that, in order to ensure good quality matches, we impose that the propensity scores are within 0.2 standard deviatons of eachother. 
+
+```{r}
+# Define a caliper as 0.2 times the standard deviation of the propensity scores
+caliper <- 0.2 * sd(data$ps)
+
+# Fetch untreated and treated data separately
+dat0 <- data[data$trt == 0, ]  # Untreated (non-quitters)
+dat1 <- data[data$trt == 1, ]  # Treated (quitters)
+
+# Create a placeholder for matching untreated units (with replacement)
+match.dat0 <- dat1  
+
+# Perform nearest neighbor matching with replacement (using caliper)
+for (i in 1:nrow(dat1)) {  
+  tmp <- dat0                     # All untreated units
+  tmp$psi <- dat1$ps[i]           # Treated unit i's propensity score
+  tmp$difps <- abs(tmp$psi - tmp$ps)  # Absolute difference in PS
+  
+  # Apply caliper: consider only untreated with difference <= caliper
+  tmp <- tmp[tmp$difps <= caliper, ]
+  
+  # If a match is found within the caliper, select the closest one
+  if (nrow(tmp) > 0) {
+    tmp <- tmp[order(tmp$difps), ]
+    tmp <- tmp[, 1:(ncol(tmp)-2)]  # Remove helper columns ('psi' and 'difps')
+    match.dat0[i, ] <- tmp[1, ]     # Assign best match to treated unit i
+  }
+}
+
+# Combine the matched untreated units with all treated units
+match.dat_ps_with <- rbind(match.dat0, dat1)
+
+# Compute the Average Treatment Effect (ATE) on the matched sample
+ATE_with <- mean(match.dat_ps_with$wt82_71[match.dat_ps_with$qsmk == 1]) - 
+            mean(match.dat_ps_with$wt82_71[match.dat_ps_with$qsmk == 0])
+
+```
+
+```{r, echo=FALSE}
+
+# Print a clear summary of the results
+cat("\nPropensity Score Matching (With Replacement) Summary:\n")
+cat("• Number of matched pairs:", nrow(match.dat_ps_with) / 2, "\n")
+cat("• Estimated ATE on matched sample:", round(ATE_with, 2), "kg\n")
+```
+
+
+```{r}
+# Define a caliper as 0.2 times the standard deviation of the propensity scores
+caliper <- 0.2 * sd(data$ps)
+
+# Split the data into untreated and treated groups
+dat0_ps <- data[data$trt == 0, ]  # Untreated (non-quitters)
+dat1_ps <- data[data$trt == 1, ]  # Treated (quitters)
+
+# Create a placeholder for matching untreated units (for treated individuals)
+match.dat0_ps <- dat1_ps  
+
+# Create an empty vector to keep track of the row names of already matched untreated units
+matched_indices <- numeric()         
+
+# Perform 1:1 nearest neighbor matching without replacement with a caliper
+for (i in 1:nrow(dat1_ps)) {
+  tmp <- dat0_ps[!rownames(dat0_ps) %in% matched_indices, ]
+  tmp$psi <- dat1_ps$ps[i]               # Treated unit i's propensity score
+  tmp$difps <- abs(tmp$psi - tmp$ps)      # Absolute difference in PS
+  
+  # Apply caliper: keep only untreated with PS difference within the caliper
+  tmp <- tmp[tmp$difps <= caliper, ]
+  
+  # Order the untreated units by smallest PS difference
+  tmp <- tmp[order(tmp$difps), ]
+  
+  if(nrow(tmp) > 0) {
+    matched_indices <- c(matched_indices, rownames(tmp[1, ]))  # Mark the matched untreated unit
+    tmp <- tmp[1, 1:(ncol(tmp)-2)]   # Remove the helper columns (psi and difps)
+    match.dat0_ps[i, ] <- tmp         # Assign the best match to the treated unit i
+  }
+}
+
+# Combine the matched untreated units with all treated units
+match.dat_ps_without <- rbind(match.dat0_ps, dat1_ps)
+
+# Calculate the Average Treatment Effect (ATE) on the matched sample
+ATE_without <- mean(match.dat_ps_without$wt82_71[match.dat_ps_without$qsmk == 1]) -
+               mean(match.dat_ps_without$wt82_71[match.dat_ps_without$qsmk == 0])
+```
+
+```{r, echo=FALSE}
+# Report the results
+cat("\nPropensity Score Matching (Without Replacement) Summary:\n")
+cat("Number of matched pairs:", nrow(match.dat_ps_without) / 2, "\n")
+cat("Estimated ATE on matched sample:", round(ATE_without, 2), "kg\n")
+```
+Results for PSM without replacement show that the average treatment effect (ATE) is 2.85, which differs slightly from other methods.
+
+To evaluate these results, point estimates alone are not sufficient. We can compute 95% confidence intervals to determine whether the effect is statistically significant.
+
+We calculate the 95% confidence interval (CI) for the average treatment effect by first estimating the standard error (SE) of the difference in mean outcomes between the treated and untreated groups. Let \( \bar{Y}_1 \) and \( \bar{Y}_0 \) be the mean weight gains for treated and untreated individuals, with standard deviations \( s_1 \) and \( s_0 \), and sample sizes \( n_1 \) and \( n_0 \), respectively. The standard error is computed as
+
+\[
+SE = \sqrt{\frac{s_1^2}{n_1} + \frac{s_0^2}{n_0}}.
+\]
+
+The 95% CI for the ATE is then given by
+
+\[
+\text{ATi want toE} \pm 1.96 \times SE,
+\]
+
+where \( \text{ATE} = \bar{Y}_1 - \bar{Y}_0 \). This interval provides a range in which we are 95% confident that the true causal effect lies.
+
+
+```{r, echo=FALSE}
+
+# Calculate ATE (difference in means of weight gain)
+ATE_with <- mean(match.dat_ps_with$wt82_71[match.dat_ps_with$qsmk == 1]) - 
+            mean(match.dat_ps_with$wt82_71[match.dat_ps_with$qsmk == 0])
+
+# Number of treated and untreated in the matched sample
+n1_with <- sum(match.dat_ps_with$qsmk == 1)
+n0_with <- sum(match.dat_ps_with$qsmk == 0)
+
+# Standard deviations of weight gain
+s1_with <- sd(match.dat_ps_with$wt82_71[match.dat_ps_with$qsmk == 1])
+s0_with <- sd(match.dat_ps_with$wt82_71[match.dat_ps_with$qsmk == 0])
+
+# Standard error of the difference in means
+SE_with <- sqrt((s1_with^2/n1_with) + (s0_with^2/n0_with))
+
+# 95% Confidence Interval
+CI_with <- ATE_with + c(-1.96, 1.96)*SE_with
+
+# Print results
+cat("\nPSM WITH REPLACEMENT:\n")
+cat("Number of matched pairs:", nrow(match.dat_ps_with)/2, "\n")
+cat("Estimated ATE:", round(ATE_with, 2), "kg\n")
+cat("95% CI: [", round(CI_with[1],2), ",", round(CI_with[2],2), "]\n")
+
+```
+
+```{r, echo=FALSE}
+
+# Calculate ATE (difference in means of weight gain)
+ATE_without <- mean(match.dat_ps_without$wt82_71[match.dat_ps_without$qsmk == 1]) - 
+               mean(match.dat_ps_without$wt82_71[match.dat_ps_without$qsmk == 0])
+
+# Number of treated and untreated in the matched sample
+n1_without <- sum(match.dat_ps_without$qsmk == 1)
+n0_without <- sum(match.dat_ps_without$qsmk == 0)
+
+# Standard deviations of weight gain
+s1_without <- sd(match.dat_ps_without$wt82_71[match.dat_ps_without$qsmk == 1])
+s0_without <- sd(match.dat_ps_without$wt82_71[match.dat_ps_without$qsmk == 0])
+
+# Standard error of the difference in means
+SE_without <- sqrt((s1_without^2/n1_without) + (s0_without^2/n0_without))
+
+# 95% Confidence Interval
+CI_without <- ATE_without + c(-1.96, 1.96)*SE_without
+
+# Print results
+cat("\nPSM WITHOUT REPLACEMENT:\n")
+cat("Number of matched pairs:", nrow(match.dat_ps_without)/2, "\n")
+cat("Estimated ATE:", round(ATE_without, 2), "kg\n")
+cat("95% CI: [", round(CI_without[1],2), ",", round(CI_without[2],2), "]\n")
+
+```
+
+
+Additionally, below we can find some plots to visually check that the matching has been done correctly. 
+
+```{r, covbyps, fig.height=7, fig.width=12, dpi=100, echo=FALSE}
+match.dat_ps_without$qsmk <- factor(match.dat_ps_without$qsmk, levels = c(0,1), labels = c("Untreated", "Treated"))
+colors <- c("royalblue", "darkred")
+
+# Scatter plot: Age vs. Propensity Score
+p1 <- ggplot(match.dat_ps_without, aes(x = ps, y = age, color = qsmk)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "loess", se = FALSE, lwd = 1) + 
+  scale_color_manual(values = colors) +
+  labs(x = "Propensity Score", y = "Age", color = "Group") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Scatter plot: Race vs. Propensity Score
+p2 <- ggplot(match.dat_ps_without, aes(x = ps, y = as.numeric(race), color = qsmk)) +
+  geom_jitter(alpha = 0.6, height = 0.1) +  # Jitter for better visibility
+  geom_smooth(method = "loess", se = FALSE, lwd = 1) + 
+  scale_color_manual(values = colors) +
+  scale_y_continuous(breaks = c(0, 1), labels = c("White", "Non-White")) +
+  labs(x = "Propensity Score", y = "Race", color = "Group") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Scatter plot: Sex vs. Propensity Score
+p3 <- ggplot(match.dat_ps_without, aes(x = ps, y = as.numeric(sex), color = qsmk)) +
+  geom_jitter(alpha = 0.6, height = 0.1) + 
+  geom_smooth(method = "loess", se = FALSE, lwd = 1) + 
+  scale_color_manual(values = colors) +
+  scale_y_continuous(breaks = c(0, 1), labels = c("Male", "Female")) +
+  labs(x = "Propensity Score", y = "Sex", color = "Group") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Scatter plot: Education vs. Propensity Score
+p4 <- ggplot(match.dat_ps_without, aes(x = ps, y = as.numeric(education), color = qsmk)) +
+  geom_jitter(alpha = 0.6, height = 0.2) +  # Jittered points to avoid overlap
+  scale_color_manual(values = colors) +
+  scale_y_continuous(breaks = 1:5, labels = c("8th Grade", "HS Dropout", "HS", "College Dropout", "College+")) +
+  labs(x = "Propensity Score", y = "Education", color = "Group") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Arrange plots in a 2x2 grid
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+
+```
+
+As we can observe in the plots above, we find near identical means of each covariate at each value of propensity score. However, due to a lack of data,  for high propensity scores the matching is not perfect for some covariates.
+
+The results from both matching methods are quite consistent. Using matching with replacement, we estimated an average treatment effect (ATE) of 3.14 kg with a 95% confidence interval of [2.04, 4.24] kg, which clearly does not include zero, indicating statistical significance. Similarly, matching without replacement yielded an ATE of 2.85 kg, which is very similar to the former estimate. The close agreement between the two approaches reinforces our confidence in the finding that quitting smoking is associated with a significant weight gain of approximately 3 kg. Refinements in matching procedures or a larger sample size could potentially narrow the CI, but as it stands, the results provide a robust indication of a significant weight gain associated with smoking cessation
+
+# Discussion
+
+In our methodology, we utilized four approaches to balance the covariate distribution between treatment groups: Inverse Probability Weighting, Stabilized Inverse Probability Weighting, Propensity Score Matching, and Standardization. All methods produced consistent results, indicating a positive causal effect of smoking cessation on weight gain. Specifically, individuals who quit smoking gained approximately 2.85 to 3.35 kilograms more than those who continued smoking.
+
+Lastly, we will explore several strategies to enhance our project. One option could be to further refine the logistic regression model used for inverse probability weighting by incorporating interaction terms and, instead of relying solely on predefined nonlinear terms, utilizing splines to model complex relationships more flexibly. This allows for a more precise estimation of propensity scores by capturing subtle variations in covariate effects.
+
+Additionally, rather than restricting our approach to logistic regression and Random Forest, we could explore alternative machine learning algorithms such as decision trees or gradient boosting methods. Support Vector Machines and Generalized Additive Models could further enhance flexibility, while Bayesian Additive Regression Trees provide a nonparametric alternative particularly suited for causal inference.
+
+We could also consider, to further strengthen our methodology, incorporating all available covariates. However, high-dimensional data introduce challenges such as multicollinearity, overfitting, and reduced interpretability, which may confound causal estimates. In such cases, regularization techniques—such as LASSO can help by selecting the most relevant covariates and shrinking less informative ones. Alternatively, a Bayesian framework could provide a principled way to incorporate prior knowledge and quantify uncertainty in propensity score estimation.
+
